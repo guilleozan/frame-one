@@ -1,0 +1,763 @@
+<script>
+
+// ======================================================================================================================================
+// TIPPY — activate tooltips
+// ======================================================================================================================================
+$(document).ready(function() {
+
+  window.Webflow = window.Webflow || [];
+  Webflow.push(function () {
+
+    // Activate tippy
+    tippy('[data-tooltip-content]', {
+      content: (reference) => reference.getAttribute('data-tooltip-content')
+    });
+  });
+
+});
+
+// ======================================================================================================================================
+// SHARED VIDEO HELPERS — parser + API loaders used by both the background and the modal
+// ======================================================================================================================================
+(function () {
+  'use strict';
+
+  var YT_API_URL = 'https://www.youtube.com/iframe_api';
+  var VIMEO_SDK_URL = 'https://player.vimeo.com/api/player.js';
+
+  // ---------- URL parsing → { provider, id, hash } ----------
+  // Accepts a full URL (preferred) or a bare ID: all digits = Vimeo, 11-char token = YouTube.
+  function parseVideoSource(input) {
+    if (!input) return null;
+    var val = String(input).trim();
+
+    if (/^\d+$/.test(val)) return { provider: 'vimeo', id: val, hash: null };
+    if (/^[a-zA-Z0-9_-]{11}$/.test(val)) return { provider: 'youtube', id: val, hash: null };
+
+    var u;
+    try { u = new URL(val); } catch (_) { return null; }
+    var host = u.hostname.replace(/^www\./, '');
+    var m;
+
+    // --- YouTube ---
+    if (host === 'youtu.be') {
+      var short = u.pathname.split('/').filter(Boolean)[0];
+      if (short && /^[a-zA-Z0-9_-]{11}$/.test(short)) return { provider: 'youtube', id: short, hash: null };
+      return null;
+    }
+    if (host === 'youtube.com' || host.endsWith('.youtube.com')) {
+      var v = u.searchParams.get('v');
+      if (v && /^[a-zA-Z0-9_-]{11}$/.test(v)) return { provider: 'youtube', id: v, hash: null };
+      m = u.pathname.match(/\/(?:embed|shorts|live)\/([a-zA-Z0-9_-]{11})/);
+      if (m) return { provider: 'youtube', id: m[1], hash: null };
+      return null;
+    }
+
+    // --- Vimeo ---
+    if (host === 'vimeo.com' || host.endsWith('.vimeo.com')) {
+      m = u.pathname.match(/\/video\/(\d+)/);
+      if (m) return { provider: 'vimeo', id: m[1], hash: u.searchParams.get('h') || null };
+      m = u.pathname.match(/^\/(\d+)(?:\/([a-zA-Z0-9]+))?/);
+      if (m) return { provider: 'vimeo', id: m[1], hash: m[2] || null };
+      m = u.pathname.match(/\/(?:channels\/[^/]+|groups\/[^/]+\/videos|manage\/videos)\/(\d+)/);
+      if (m) return { provider: 'vimeo', id: m[1], hash: null };
+      return null;
+    }
+
+    return null;
+  }
+
+  // ---------- YouTube IFrame API loader (single load, cached promise) ----------
+  var ytApiPromise = null;
+  function loadYouTubeApi() {
+    if (window.YT && window.YT.Player) return Promise.resolve();
+    if (ytApiPromise) return ytApiPromise;
+    ytApiPromise = new Promise(function (resolve) {
+      var prev = window.onYouTubeIframeAPIReady;
+      window.onYouTubeIframeAPIReady = function () {
+        if (typeof prev === 'function') { try { prev(); } catch (_) {} }
+        resolve();
+      };
+      if (!document.querySelector('script[src="' + YT_API_URL + '"]')) {
+        var tag = document.createElement('script');
+        tag.src = YT_API_URL;
+        document.head.appendChild(tag);
+      }
+      // Safety net in case another loader resolved YT before our patch
+      var attempts = 0;
+      var poll = setInterval(function () {
+        if (window.YT && window.YT.Player) { clearInterval(poll); resolve(); }
+        else if (++attempts > 100) { clearInterval(poll); }
+      }, 100);
+    });
+    return ytApiPromise;
+  }
+
+  // ---------- Vimeo SDK loader (single load, cached promise) ----------
+  var vimeoSdkPromise = null;
+  function loadVimeoSdk() {
+    if (window.Vimeo && window.Vimeo.Player) return Promise.resolve();
+    if (vimeoSdkPromise) return vimeoSdkPromise;
+    vimeoSdkPromise = new Promise(function (resolve, reject) {
+      var tag = document.createElement('script');
+      tag.src = VIMEO_SDK_URL;
+      tag.onload = resolve;
+      tag.onerror = function () { reject(new Error('Vimeo SDK failed to load')); };
+      document.head.appendChild(tag);
+    });
+    return vimeoSdkPromise;
+  }
+
+  // Expose the shared helpers so the background and modal blocks can reuse them
+  window.VideoHelpers = {
+    parseVideoSource: parseVideoSource,
+    loadYouTubeApi: loadYouTubeApi,
+    loadVimeoSdk: loadVimeoSdk
+  };
+})();
+
+// ======================================================================================================================================
+// VIDEO BACKGROUNDS v3 (unified) — [data-video-bg-url]
+// One attribute, two providers: the script auto-detects Vimeo or YouTube from the URL.
+//   Vimeo  → background=1 (zero UI), exact cover from the video's real aspect ratio (oEmbed), instant reveal.
+//   YouTube → 16:9 cover with overscan to crop edge artifacts, manual loop, autoplay retry.
+// Shared: section-based sizing, per-breakpoint sources, lazy init, offscreen pause, poster fallback, reduced motion.
+// NOTE: Vimeo background=1 requires a paid plan on the video owner's account.
+// Per-breakpoint sources: data-video-bg-url (base), data-video-bg-url-mobile, data-video-bg-url-tablet.
+// ======================================================================================================================================
+(function () {
+  'use strict';
+
+  var SELECTOR = '[data-video-bg-url]';
+  var VIMEO_COVER_SAFETY = 1.03;  // 3% overscan to avoid edge gaps
+  var YT_COVER_SAFETY = 1.15;     // extra overscan: crops YouTube edge artifacts
+  var LAZY_ROOT_MARGIN = '200px';
+
+  var H = window.VideoHelpers;
+
+  // Breakpoints aligned with Webflow
+  var MQ_MOBILE = window.matchMedia('(max-width: 767px)');
+  var MQ_TABLET = window.matchMedia('(min-width: 768px) and (max-width: 991px)');
+
+  var instances = [];
+
+  // ---------- CSS (injected once) ----------
+  (function injectCss() {
+    if (document.getElementById('video-bg-css')) return;
+    var s = document.createElement('style');
+    s.id = 'video-bg-css';
+    s.textContent = [
+      'iframe.video-bg-iframe {',
+      '  position: absolute;',
+      '  top: 50%; left: 50%;',
+      '  transform: translate(-50%, -50%);',
+      '  border: 0;',
+      '  pointer-events: none;',
+      '  opacity: 0;',
+      '  transition: opacity 600ms ease;',
+      '}',
+      'iframe.video-bg-iframe.is-playing { opacity: 1; }'
+    ].join('\n');
+    document.head.appendChild(s);
+  })();
+
+  // ---------- Metadata: aspect ratio + poster (cached per video) ----------
+  var metaCache = new Map();
+  function fetchMeta(src) {
+    var key = src.provider + '|' + src.id + '|' + (src.hash || '');
+    if (metaCache.has(key)) return metaCache.get(key);
+
+    var p;
+    if (src.provider === 'vimeo') {
+      var videoUrl = 'https://vimeo.com/' + src.id + (src.hash ? '/' + src.hash : '');
+      p = fetch('https://vimeo.com/api/oembed.json?url=' + encodeURIComponent(videoUrl))
+        .then(function (r) { return r.ok ? r.json() : null; })
+        .then(function (d) {
+          return (d && d.width && d.height)
+            ? { w: d.width, h: d.height, thumb: d.thumbnail_url || null }
+            : { w: 16, h: 9, thumb: null };
+        })
+        .catch(function () { return { w: 16, h: 9, thumb: null }; });
+    } else {
+      // YouTube backgrounds are treated as 16:9. maxresdefault may 404 on some videos: harmless as a CSS background
+      p = Promise.resolve({ w: 16, h: 9, thumb: 'https://i.ytimg.com/vi/' + src.id + '/maxresdefault.jpg' });
+    }
+
+    metaCache.set(key, p);
+    return p;
+  }
+
+  // ---------- Helpers ----------
+  function toSeconds(t) {
+    if (!t) return 0;
+    if (/^\d+$/.test(t)) return parseInt(t, 10);
+    var m = String(t).match(/^(?:(\d+)m)?(?:(\d+)s)?$/);
+    if (!m) return 0;
+    return (parseInt(m[1] || 0, 10) * 60) + parseInt(m[2] || 0, 10);
+  }
+
+  // Reference box: the SECTION (both naming generations supported)
+  function findFrame(container) {
+    return container.closest('.vimeo-bg-section, .vimeo-bg-section-inner-wrapper-section, .youtube-bg-section, .youtube-bg-section-inner-wrapper-section')
+        || container.closest('.vimeo-bg-section-outer-wrapper, .youtube-bg-section-outer-wrapper')
+        || container;
+  }
+
+  // Source per breakpoint
+  function pickSourceUrl(container) {
+    var mobile = container.getAttribute('data-video-bg-url-mobile');
+    var tablet = container.getAttribute('data-video-bg-url-tablet');
+    if (MQ_MOBILE.matches) return mobile || container.getAttribute('data-video-bg-url');
+    if (MQ_TABLET.matches) return tablet || container.getAttribute('data-video-bg-url');
+    return container.getAttribute('data-video-bg-url');
+  }
+
+  // Exact cover against the section box
+  function coverResize(state) {
+    if (!state.iframe || !state.meta) return;
+
+    var r = state.frame.getBoundingClientRect();
+    var w = r.width;
+    var h = r.height;
+    if (w < 2 || h < 2) return;
+
+    var safety = state.providerApi === 'youtube' ? YT_COVER_SAFETY : VIMEO_COVER_SAFETY;
+    var scale = Math.max(w / state.meta.w, h / state.meta.h) * safety;
+    state.iframe.style.width = Math.ceil(state.meta.w * scale) + 'px';
+    state.iframe.style.height = Math.ceil(state.meta.h * scale) + 'px';
+  }
+
+  // ---------- Pause / resume (provider-aware) ----------
+  function pauseInstance(state) {
+    if (!state.player) return;
+    if (state.providerApi === 'vimeo') state.player.pause().catch(function () {});
+    else { try { state.player.pauseVideo(); } catch (_) {} }
+  }
+  function resumeInstance(state) {
+    if (!state.player) return;
+    if (state.providerApi === 'vimeo') state.player.play().catch(function () {});
+    else { try { state.player.playVideo(); } catch (_) {} }
+  }
+
+  // ---------- Teardown before remount (breakpoint source switch) ----------
+  function destroyInstance(state) {
+    var p = state.player;
+    state.player = null;
+    state.iframe = null;
+    state.started = false;
+    if (!p) return Promise.resolve();
+
+    if (state.providerApi === 'vimeo') {
+      return p.destroy().catch(function () {});
+    }
+    try { p.destroy(); } catch (_) {}  // YT destroy is sync and restores the mount element
+    if (state.mountEl && state.mountEl.parentNode) {
+      state.mountEl.parentNode.removeChild(state.mountEl);
+    }
+    state.mountEl = null;
+    return Promise.resolve();
+  }
+
+  // ---------- Provider mounts ----------
+  function mountVimeo(state, src, opts) {
+    var params = new URLSearchParams({
+      background: '1',
+      autoplay: '1',
+      muted: '1',
+      loop: '1',
+      autopause: '0',   // multiple bg videos on one page without pausing each other
+      playsinline: '1',
+      dnt: '1'
+    });
+    if (src.hash) params.set('h', src.hash);
+    if (opts.quality) params.set('quality', opts.quality);
+
+    var embedSrc = 'https://player.vimeo.com/video/' + src.id + '?' + params.toString();
+    if (opts.start) {
+      var t = /^\d+$/.test(opts.start) ? opts.start + 's' : opts.start;
+      embedSrc += '#t=' + encodeURIComponent(t);
+    }
+
+    var iframe = document.createElement('iframe');
+    iframe.className = 'video-bg-iframe vimeo-bg-iframe'; // legacy class kept for any custom CSS
+    iframe.src = embedSrc;
+    iframe.allow = 'autoplay; fullscreen; picture-in-picture';
+    iframe.title = 'Background video';
+    iframe.setAttribute('aria-hidden', 'true');
+    iframe.tabIndex = -1;
+    state.container.appendChild(iframe);
+    state.iframe = iframe;
+
+    var player = new Vimeo.Player(iframe);
+    state.player = player;
+
+    function reveal() {
+      if (state.started || state.player !== player) return;
+      state.started = true;
+      iframe.classList.add('is-playing'); // instant: background=1 has zero UI to hide
+    }
+
+    player.on('loaded', function () { coverResize(state); });
+    player.on('play', function () { reveal(); coverResize(state); });
+    player.on('timeupdate', function (d) { if (d.seconds > 0) reveal(); });
+    player.on('error', function (e) { console.warn('[VideoBG] Vimeo player error:', e); });
+
+    // Autoplay retry in case the browser blocks it
+    var tries = 0;
+    function kick() {
+      if (state.started || !state.inView || tries >= 5 || state.player !== player) return;
+      tries++;
+      player.setMuted(true)
+        .then(function () { return player.play(); })
+        .catch(function () { setTimeout(kick, 800 * tries); });
+    }
+    player.ready().then(kick).catch(function () {});
+  }
+
+  function mountYouTube(state, src, opts) {
+    var mountEl = document.createElement('div');
+    state.container.appendChild(mountEl);
+    state.mountEl = mountEl;
+
+    var startSec = toSeconds(opts.start);
+
+    var playerVars = {
+      autoplay: 1,
+      controls: 0,
+      showinfo: 0,
+      mute: 1,
+      fs: 0,
+      iv_load_policy: 3,
+      rel: 0,
+      disablekb: 1,
+      playsinline: 1,
+      enablejsapi: 1
+    };
+    if (startSec) playerVars.start = startSec;
+    if (window.location.origin && window.location.origin !== 'null') {
+      playerVars.origin = window.location.origin;
+    }
+
+    var autoplayKicked = false;
+
+    var player = new YT.Player(mountEl, {
+      videoId: src.id,
+      playerVars: playerVars,
+      events: {
+        onReady: function (ev) {
+          // mute -> play, in that order, to satisfy the autoplay policy
+          try { ev.target.mute(); } catch (_) {}
+          try { ev.target.playVideo(); } catch (_) {}
+
+          var iframe = ev.target.getIframe ? ev.target.getIframe() : null;
+          if (iframe) {
+            iframe.classList.add('video-bg-iframe', 'vimeo-bg-iframe');
+            iframe.style.pointerEvents = 'none';
+            state.iframe = iframe;
+          }
+          coverResize(state);
+        },
+        onStateChange: function (ev) {
+          var YTP = YT.PlayerState;
+
+          if (ev.data === YTP.PLAYING) {
+            autoplayKicked = true;
+            if (!state.started && state.player === player) {
+              state.started = true;
+              if (state.iframe) state.iframe.classList.add('is-playing');
+            }
+            coverResize(state);
+          }
+
+          // Retry if autoplay got blocked before it ever started
+          if (!autoplayKicked && state.inView &&
+              (ev.data === YTP.UNSTARTED || ev.data === YTP.PAUSED || ev.data === YTP.CUED)) {
+            try { ev.target.mute(); } catch (_) {}
+            try { ev.target.playVideo(); } catch (_) {}
+          }
+
+          // Manual loop: more reliable than the loop/playlist params
+          if (ev.data === YTP.ENDED) {
+            try { ev.target.seekTo(startSec || 0); ev.target.playVideo(); } catch (_) {}
+          }
+        }
+      }
+    });
+    state.player = player;
+  }
+
+  // ---------- Mount (and remount on breakpoint change) ----------
+  function mount(state) {
+    if (state.building) return;
+
+    var url = pickSourceUrl(state.container);
+    var src = H.parseVideoSource(url);
+    if (!src) {
+      console.warn('[VideoBG] Invalid or unsupported URL:', url);
+      return;
+    }
+
+    var key = src.provider + '|' + src.id + '|' + (src.hash || '');
+    if (state.key === key && state.player) return; // same source, nothing to do
+    state.building = true;
+
+    var opts = {
+      quality: state.container.getAttribute('data-video-quality') || null, // Vimeo only; YouTube ignores it
+      start: state.container.getAttribute('data-video-start') || null
+    };
+
+    var apiLoad = src.provider === 'vimeo' ? H.loadVimeoSdk() : H.loadYouTubeApi();
+
+    destroyInstance(state)
+      .then(function () { return Promise.all([apiLoad, fetchMeta(src)]); })
+      .then(function (res) {
+        state.meta = res[1];
+        state.key = key;
+        state.providerApi = src.provider;
+
+        // Reveal the section overlay (both naming generations)
+        var overlay = state.container.parentElement &&
+          state.container.parentElement.querySelector('.vimeo-bg-section-overlay, .youtube-bg-section-overlay');
+        if (overlay) overlay.classList.remove('u-d-none');
+
+        // Automatic poster if the container has no image of its own
+        if (state.meta.thumb && !state.container.querySelector('img')) {
+          state.container.style.backgroundImage = 'url("' + state.meta.thumb + '")';
+          state.container.style.backgroundSize = 'cover';
+          state.container.style.backgroundPosition = 'center';
+        }
+
+        if (src.provider === 'vimeo') mountVimeo(state, src, opts);
+        else mountYouTube(state, src, opts);
+
+        // Several sizing passes: initial + deferred for late layout (fonts, images, YT iframe creation)
+        coverResize(state);
+        setTimeout(function () { coverResize(state); }, 250);
+        setTimeout(function () { coverResize(state); }, 1000);
+
+        state.building = false;
+      })
+      .catch(function (err) {
+        state.building = false;
+        console.warn('[VideoBG] Mount failed, poster stays:', err);
+      });
+  }
+
+  // ---------- Init per container ----------
+  function initOne(container) {
+    if (container.dataset.videoBgInit) return;
+    container.dataset.videoBgInit = 'true';
+
+    // Accessibility: if the visitor asked for reduced motion, the poster stays
+    if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
+      console.info('[VideoBG] prefers-reduced-motion is on: video skipped, poster stays.');
+      return;
+    }
+
+    var state = {
+      container: container,
+      frame: findFrame(container),
+      providerApi: null,
+      player: null,
+      iframe: null,
+      mountEl: null,
+      meta: null,
+      key: null,
+      started: false,
+      inView: true,
+      building: false
+    };
+    instances.push(state);
+
+    mount(state);
+
+    var sizeIt = function () { coverResize(state); };
+
+    // The reference box is the section: any change on it triggers a recalculation
+    if ('ResizeObserver' in window) new ResizeObserver(sizeIt).observe(state.frame);
+    window.addEventListener('resize', sizeIt, { passive: true });
+    window.addEventListener('orientationchange', sizeIt);
+    window.addEventListener('load', sizeIt);
+
+    // Offscreen pause: saves CPU, battery and data. Resumes when back in view.
+    if (container.getAttribute('data-video-pause-offscreen') !== 'false' &&
+        'IntersectionObserver' in window) {
+      new IntersectionObserver(function (entries) {
+        entries.forEach(function (entry) {
+          state.inView = entry.isIntersecting;
+          if (state.inView) resumeInstance(state);
+          else pauseInstance(state);
+        });
+      }, { threshold: 0.05 }).observe(container);
+    }
+  }
+
+  // ---------- Source switch when crossing breakpoints ----------
+  function onBreakpointChange() {
+    instances.forEach(function (state) { mount(state); });
+  }
+  MQ_MOBILE.addEventListener('change', onBreakpointChange);
+  MQ_TABLET.addEventListener('change', onBreakpointChange);
+
+  // ---------- Boot with viewport lazy init ----------
+  function scan() {
+    var nodes = document.querySelectorAll(SELECTOR);
+    if (!nodes.length) return;
+
+    if ('IntersectionObserver' in window) {
+      var io = new IntersectionObserver(function (entries) {
+        entries.forEach(function (entry) {
+          if (entry.isIntersecting) {
+            io.unobserve(entry.target);
+            initOne(entry.target);
+          }
+        });
+      }, { rootMargin: LAZY_ROOT_MARGIN });
+
+      nodes.forEach(function (n) {
+        if (n.dataset.videoBgSeen) return;
+        n.dataset.videoBgSeen = 'true';
+        io.observe(n);
+      });
+    } else {
+      nodes.forEach(initOne);
+    }
+  }
+
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', scan);
+  } else {
+    scan();
+  }
+
+  // Manual re-scan hook for content injected later (Finsweet, filters, etc.)
+  window.VideoBG = { scan: scan };
+  window.VimeoBG = window.VideoBG; // backward-compat alias
+})();
+
+// ======================================================================================================================================
+// YOUTUBE MODAL PLAYER — opens a YouTube video inside #youtube-modal, triggered by .open-modal
+// Reads the full URL (or ID) from data-video-url on the trigger. YouTube only.
+// ======================================================================================================================================
+(function() {
+  // Ensure we do not bind handlers multiple times, but never abort the script entirely
+  if (!window.__ytOpenListenerBound) {
+    window.__ytOpenListenerBound = false;
+  }
+
+  var H = window.VideoHelpers;
+
+  let hasTriedUnmute = false; // per playback attempt
+  const defaultVideoId = 's7MITaa2bJc';
+  const playersByModal = new WeakMap(); // modalEl -> player
+  const ctxByPlayer = new WeakMap();    // player -> { modal, wrapper, closeBtn }
+
+  function uniqueMountFor(modal) {
+    const mountId = 'youtube-player-mount';
+    let container = modal.querySelector('.modal-popup_content-wrapper .video-container');
+    if (!container) container = modal.querySelector('.video-container');
+    if (!container) return null;
+    container.innerHTML = `<div id="${mountId}"></div>`;
+    try {
+      container.style.width = '100%';
+      container.style.height = '100%';
+      const mountEl = document.getElementById(mountId);
+      if (mountEl) {
+        mountEl.style.width = '100%';
+        mountEl.style.height = '100%';
+      }
+    } catch(_) {}
+    return mountId;
+  }
+
+  function ensurePlayerFor(modal, wrapper, closeBtn, videoId) {
+    const existing = playersByModal.get(modal);
+    if (existing) {
+      try { existing.stopVideo && existing.stopVideo(); } catch(_) {}
+      try { existing.destroy && existing.destroy(); } catch(_) {}
+      playersByModal.delete(modal);
+    }
+    const mountId = uniqueMountFor(modal);
+    if (!mountId || typeof YT === 'undefined') return null;
+    const player = new YT.Player(mountId, {
+      videoId: videoId,
+      playerVars: {
+        autoplay: 1,
+        controls: 1,
+        rel: 0,
+        modestbranding: 1,
+        playsinline: 1,
+        enablejsapi: 1
+      },
+      events: {
+        onReady: (ev) => onPlayerReady(ev, modal),
+        onStateChange: onPlayerStateChange
+      }
+    });
+    playersByModal.set(modal, player);
+    ctxByPlayer.set(player, { modal, wrapper, closeBtn });
+    return player;
+  }
+
+  function onPlayerReady(ev, modal) {
+    const p = ev && ev.target ? ev.target : playersByModal.get(modal);
+    try {
+      const iframe = p.getIframe ? p.getIframe() : null;
+      if (iframe) {
+        const existing = iframe.getAttribute('allow') || '';
+        const allow = new Set(existing.split(';').map(s => s.trim()).filter(Boolean));
+        ['autoplay','encrypted-media','picture-in-picture','fullscreen','clipboard-write'].forEach(f => allow.add(f));
+        iframe.setAttribute('allow', Array.from(allow).join('; '));
+        iframe.setAttribute('allowfullscreen', '');
+        iframe.setAttribute('playsinline', '');
+        iframe.setAttribute('width', '100%');
+        iframe.setAttribute('height', '100%');
+        iframe.style.width = '100%';
+        iframe.style.height = '100%';
+        iframe.style.display = 'block';
+      }
+    } catch(_) {}
+    hasTriedUnmute = false;
+    try { p.mute(); } catch(_) {}
+    try { p.playVideo(); } catch(_) {}
+  }
+
+  function onPlayerStateChange(e) {
+    if (!e || typeof YT === 'undefined') return;
+    const player = e.target;
+    const ctx = ctxByPlayer.get(player);
+    if (!ctx) return;
+    if (e.data === YT.PlayerState.PLAYING && !hasTriedUnmute) {
+      hasTriedUnmute = true;
+      setTimeout(() => {
+        try { player.unMute(); player.playVideo(); } catch(_) {}
+        setTimeout(() => {
+          try {
+            if (player.getPlayerState() !== YT.PlayerState.PLAYING) {
+              player.mute();
+              player.playVideo();
+            }
+          } catch(_) {}
+        }, 400);
+      }, 600);
+    }
+    if (e.data === YT.PlayerState.ENDED) {
+      ctx.closeBtn && ctx.closeBtn.click();
+    }
+  }
+
+  function openModal(btn) {
+    if (!btn) return;
+    const wrapper = document.getElementById('youtube-modal');
+    if (!wrapper) return;
+    const modal = wrapper.querySelector('.modal-popup_component');
+    if (!modal) return;
+    const closeBtn = modal.querySelector('.modal-popup_close-button');
+    const overlay = modal.querySelector('.modal-popup_background-overlay');
+
+    // Read the full URL from data-video-url, parse with the shared helper (YouTube only here)
+    const raw = btn.getAttribute('data-video-url');
+    const src = raw ? H.parseVideoSource(raw) : null;
+    const vid = (src && src.provider === 'youtube') ? src.id : defaultVideoId;
+
+    modal.classList.add('w--open');
+    try {
+      modal.style.display = 'flex';
+      modal.style.opacity = '1';
+    } catch(_) {}
+
+    if (overlay && !overlay.__ytBound) {
+      overlay.addEventListener('click', () => closeBtn && closeBtn.click());
+      overlay.__ytBound = true;
+    }
+    if (closeBtn && !closeBtn.__ytBound) {
+      closeBtn.addEventListener('click', () => closeModalFor(modal, wrapper));
+      closeBtn.__ytBound = true;
+    }
+    H.loadYouTubeApi().then(() => ensurePlayerFor(modal, wrapper, closeBtn, vid));
+  }
+
+  function onOpenClick(evt) {
+    const btn = evt.target && evt.target.closest ? evt.target.closest('.open-modal') : null;
+    if (!btn) return;
+    evt.preventDefault();
+    openModal(btn);
+  }
+
+  function destroyPlayer(modal) {
+    const player = playersByModal.get(modal);
+    if (!player) return;
+    try { player.mute(); } catch(_) {}
+    try { player.stopVideo(); } catch(_) {}
+    try { player.pauseVideo(); } catch(_) {}
+    try { player.destroy(); } catch(_) {}
+    playersByModal.delete(modal);
+  }
+
+  function closeModalFor(modal, wrapper) {
+    // Immediately stop all playback
+    const player = playersByModal.get(modal);
+    if (player) {
+      try { player.mute(); } catch(_) {}
+      try { player.stopVideo(); } catch(_) {}
+      try { player.pauseVideo(); } catch(_) {}
+    }
+
+    let cleaned = false;
+    const done = () => {
+      if (cleaned) return;
+      cleaned = true;
+      try { modal.style.display = ''; modal.style.opacity = ''; } catch(_) {}
+      destroyPlayer(modal);
+    };
+    const onEndModal = () => { done(); modal.removeEventListener('transitionend', onEndModal); };
+    const onEndWrapper = () => { done(); wrapper.removeEventListener('transitionend', onEndWrapper); };
+    modal.addEventListener('transitionend', onEndModal, { once: true });
+    wrapper.addEventListener('transitionend', onEndWrapper, { once: true });
+    setTimeout(done, 700);
+  }
+
+  if (!window.__ytOpenListenerBound) {
+    document.addEventListener('click', onOpenClick);
+    window.__ytOpenListenerBound = true;
+  }
+})();
+
+// ======================================================================================================================================
+// FOOTER — set current year
+// ======================================================================================================================================
+window.Webflow = window.Webflow || [];
+  window.Webflow.push(function () {
+    var year = new Date().getFullYear();
+    document.querySelectorAll('.current-year').forEach(function (el) {
+      el.textContent = year;
+    });
+});
+
+
+// ======================================================================================================================================
+// MOBILE MENU — close nav when clicking an anchor link with a hash
+// make sure to add the class "nav-menu" to the nav menu wrapper and "nav-menu_btn" to the menu button
+// ======================================================================================================================================
+window.Webflow = window.Webflow || [];
+Webflow.push(function() {
+  // Close mobile menu when clicking anchor links with hash
+  const navMenu = document.querySelector('.nav-menu.w-nav-menu');
+  if (!navMenu) return;
+
+  navMenu.addEventListener('click', function(e) {
+    const link = e.target.closest('a[href*="#"]');
+    if (!link) return;
+
+    const href = link.getAttribute('href');
+    if (!href || !href.includes('#')) return;
+
+    // Find and click the menu close button
+    const menuButton = document.querySelector('.nav-menu_btn.w-nav-button');
+    if (menuButton && menuButton.classList.contains('w--open')) {
+      menuButton.click();
+    }
+  });
+});
+
+</script>

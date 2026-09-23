@@ -1,0 +1,50 @@
+<style>
+  :root {
+    --qa-accent-color: lime;
+  }
+
+  /* Outline empty links */
+  html.wf-design-mode a[href="#"],
+  html.wf-design-mode a[href=""] {
+    outline: 3px dashed var(--qa-accent-color);
+    outline-offset: 3px;
+  }
+
+  /* Outline bolded headlines */
+  html.wf-design-mode h1 strong,
+  html.wf-design-mode h2 strong,
+  html.wf-design-mode h3 strong,
+  html.wf-design-mode h4 strong,
+  html.wf-design-mode h5 strong,
+  html.wf-design-mode h6 strong {
+    outline: 3px solid var(--qa-accent-color) !important;
+  }
+
+  /* Allow overflow on slider to review slides */
+  html.wf-design-mode .swiper-wrapper {
+    overflow-x: auto;
+  }
+
+  /* Show component missing custom code tips */
+  html.wf-design-mode .page-wrapper:has([data-custom-code="marquee"].w-condition-invisible) .marquee-component::after,
+  html.wf-design-mode .page-wrapper:has([data-custom-code="accordion"].w-condition-invisible) .accordion-component::after,
+  html.wf-design-mode .page-wrapper:has([data-custom-code="modal"].w-condition-invisible) .modal-component::after,
+  html.wf-design-mode .page-wrapper:has([data-custom-code="slider"].w-condition-invisible) .slider-component::after,
+  html.wf-design-mode .page-wrapper:has([data-custom-code="inline-video"].w-condition-invisible) .inline-video-component::after,
+  html.wf-design-mode .page-wrapper:has([data-custom-code="tabs"].w-condition-invisible) .tabs-component::after {
+    content: "Enable custom code for this component before publishing";
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    text-align: center;
+    padding: 0.3rem 0.5rem;
+    font-size: 0.8rem;
+    line-height: 1.3;
+    background: var(--qa-accent-color);
+    color: black;
+    border-radius: 4px;
+    z-index: 10;
+    pointer-events: none;
+  }
+</style>

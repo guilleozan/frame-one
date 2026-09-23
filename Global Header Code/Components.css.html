@@ -1,0 +1,301 @@
+<style>
+
+/*------------------------------ BUTTONS------------------------------------- */
+
+
+  /* Icon slot: smooth transition both ways */
+  .button .btn-slot-right.true {
+    transition: transform 300ms ease;
+  }
+
+  /* On hover: move icon 5px to the right */
+  .button:hover .btn-slot-right.true {
+    transform: translateX(5px);
+  }
+
+  /* Color transition on hover */
+  .button {
+    transition: background-color 300ms ease;
+  }
+
+  /* ---- HOVER COLORS BY VARIANT ---- */
+  .button[data-wf--button--variant="primary"]:hover {
+    background-color: var(--backgrounds--buttons--hover-primary);
+  }
+
+  .button[data-wf--button--variant="secondary"]:hover {
+    background-color: var(--backgrounds--buttons--hover-secondary);
+  }
+
+  .button[data-wf--button--variant="tertiary"]:hover {
+    background-color: var(--backgrounds--buttons--hover-tertiary);
+  }
+
+  .button[data-wf--button--variant="fourth"]:hover {
+    background-color: var(--backgrounds--buttons--hover-fourth);
+  }
+</style>
+
+
+
+
+<style>
+/*------------------------------ MODAL------------------------------------- */
+
+
+  body:has(dialog[open]) {
+    overflow: hidden !important;
+  }
+
+  dialog.modal[open] {
+    animation: fadein 400ms ease-out forwards;
+  }
+
+  dialog.modal::backdrop {
+    background: color-mix(in srgb, var(--shared-colors--black) 80%, transparent);
+  }
+
+  @keyframes fadein {
+    0% {
+      opacity: 0;
+    }
+
+    100% {
+      opacity: 1;
+    }
+  }
+
+  dialog::-webkit-scrollbar {
+    width: 10px;
+  }
+
+  dialog::-webkit-scrollbar-track {
+    border-radius: 10px;
+    background-color: transparent;
+  }
+
+  dialog::-webkit-scrollbar-thumb {
+    border-radius: 10px;
+    border: 2px solid var(--colors--background);
+    background: var(--colors--text);
+  }
+
+  dialog::-webkit-scrollbar-thumb:window-inactive {
+    background: var(--colors--text);
+  }
+</style>
+
+
+
+
+<style>
+
+
+/*------------------------------ MARQUEE------------------------------------- */
+
+
+  @keyframes marquee-track-left {
+    0% {
+      transform: translateX(0);
+    }
+    100% {
+      transform: translateX(-50%);
+    }
+  }
+
+  @keyframes marquee-track-right {
+    0% {
+      transform: translateX(-50%);
+    }
+    100% {
+      transform: translateX(0);
+    }
+  }
+
+  .marquee-wrapper {
+    overflow: hidden;
+  }
+
+  .marquee-content {
+    display: flex;
+    width: max-content;
+    flex-wrap: nowrap;
+    will-change: transform;
+  }
+
+  .marquee-group {
+    display: flex;
+    flex-shrink: 0;
+    flex-wrap: nowrap;
+  }
+
+  /* Pause on hover */
+  .marquee-component[data-marquee-pause-on-hover="true"]:hover .marquee-content {
+    animation-play-state: paused;
+  }
+
+  /* Default direction */
+  .marquee-component[data-marquee-reverse="false"] .marquee-content {
+    animation: marquee-track-left var(--marquee-duration) linear infinite;
+  }
+
+  /* Reverse direction */
+  .marquee-component[data-marquee-reverse="true"] .marquee-content {
+    animation: marquee-track-right var(--marquee-duration) linear infinite;
+  }
+  /* Fade edges */
+  .marquee-component[data-marquee-fade-edges="true"] {
+    -webkit-mask-image: linear-gradient(
+      to right,
+      transparent 0%,
+      black 10%,
+      black 90%,
+      transparent 100%
+    );
+    mask-image: linear-gradient(
+      to right,
+      transparent 0%,
+      black 10%,
+      black 90%,
+      transparent 100%
+    );
+  }
+
+
+</style>
+
+
+
+
+
+
+<style>
+
+  
+
+/*------------------------------ SLIDER------------------------------------- */
+
+
+.swiper-button-disabled {
+  opacity: 0.5;
+  pointer-events: none;
+}
+
+[data-slider="component"] {
+  --lg: 3; /* Desktop (992px+) */
+  --md: 2; /* Tablet (768-991px) */
+  --sm: 1; /* Mobile Landscape (480-767px) */
+  --xs: 1; /* Mobile Portrait (0-479px) */
+  --gap: 24px; /* Spacing between slides */
+  --current-slides-per-view: var(--xs); /* Current active slides per view */
+}
+
+@media (min-width: 480px) and (max-width: 767px) {
+  [data-slider="component"] {
+    --current-slides-per-view: var(--sm);
+  }
+}
+
+@media (min-width: 768px) and (max-width: 991px) {
+  [data-slider="component"] {
+    --current-slides-per-view: var(--md);
+  }
+}
+
+@media (min-width: 992px) {
+  [data-slider="component"] {
+    --current-slides-per-view: var(--lg);
+  }
+}
+
+[data-slider="component"] .swiper-slide{
+ width: calc(
+    (100% - (var(--current-slides-per-view) - 1) * var(--gap)) /
+    var(--current-slides-per-view)
+  ) !important;
+  margin-right: var(--gap);
+}
+  
+
+[data-slider-overflow="false"] {
+  overflow: hidden;
+}
+
+[data-slider-overflow="true"] {
+  overflow: visible !important;
+}
+
+[data-slider="component"] .swiper-wrapper:empty{
+  min-height: 200px;
+}
+  
+[data-slider="component"] .swiper-wrapper > .w-dyn-list,
+[data-slider="component"] .swiper-wrapper > .w-dyn-list > .w-dyn-items,
+[data-slider="component"] .swiper-wrapper > .w-dyn-list > .w-dyn-items > .w-dyn-item{
+  display: contents;
+}
+
+
+
+/*------------------------------ SWIPER MAP ZOOM------------------------------------- */
+
+
+
+.swiper-map {
+  width: 100%;
+  height: calc(100% - 50px);
+  overflow: hidden;
+  cursor: grab;
+  touch-action: pan-x pan-y pinch-zoom;
+}
+
+.swiper-map:active {
+  cursor: grabbing;
+}
+
+.swiper-wrapper.swiper_wrapper-map {
+  height: 100%;
+}
+
+.swiper-slide__map {
+  height: 100%;
+  width: auto !important;
+  max-width: none !important;
+}
+
+.swiper-slide__map .swiper-zoom-container {
+  height: 100%;
+  width: auto;
+}
+
+.swiper-zoom__img {
+  height: 100%;
+  width: auto !important;
+  display: block;
+  object-fit: unset;
+  touch-action: pan-x pan-y pinch-zoom;
+}
+
+/* Zoom mode: center slide full size, neighbors scaled down progressively */
+
+
+[data-slider="slider"].is-zoom .swiper-slide > * {
+  transition: transform 400ms ease, opacity 400ms ease;
+  transform: scale(0.6);
+  opacity: 0.4;
+  transform-origin: center center;
+}
+
+/* Immediate neighbors: medium size */
+[data-slider="slider"].is-zoom .swiper-slide-prev > *,
+[data-slider="slider"].is-zoom .swiper-slide-next > * {
+  transform: scale(0.6);
+  opacity: 0.7;
+}
+
+/* Active center slide: full size */
+[data-slider="slider"].is-zoom .swiper-slide-active > * {
+  transform: scale(1.30);
+  opacity: 1;
+}
+</style>
